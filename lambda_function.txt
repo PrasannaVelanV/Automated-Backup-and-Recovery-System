@@ -1,0 +1,80 @@
+import boto3
+import datetime
+
+ec2 = boto3.client('ec2')
+sns = boto3.client('sns')
+
+SNS_TOPIC_ARN = "arn:aws:sns:ap-south-1:account-id:topic-name"
+INSTANCE_ID = "i-0123456789abcdef0"
+RETENTION_COUNT = 3
+
+def lambda_handler(event, context):
+    try:
+        instance_details = ec2.describe_instances(InstanceIds=[INSTANCE_ID])
+        block_devices = instance_details['Reservations'][0]['Instances'][0]['BlockDeviceMappings']
+
+        snapshots_created = []
+        snapshots_deleted = []
+
+        for block in block_devices:
+            volume_id = block['Ebs']['VolumeId']
+
+            description = (
+                f"AutoSnapshot | Instance: {INSTANCE_ID} | Volume: {volume_id} | "
+                f"{datetime.datetime.utcnow().strftime('%Y-%m-%d_%H-%M-%S')}"
+            )
+
+            snapshot = ec2.create_snapshot(
+                VolumeId=volume_id,
+                Description=description
+            )
+
+            snapshot_id = snapshot["SnapshotId"]
+            snapshots_created.append(snapshot_id)
+
+            ec2.create_tags(
+                Resources=[snapshot_id],
+                Tags=[
+                    {'Key': 'CreatedBy', 'Value': 'LambdaAutoSnapshot'},
+                    {'Key': 'InstanceId', 'Value': INSTANCE_ID},
+                    {'Key': 'VolumeId', 'Value': volume_id}
+                ]
+            )
+
+            lambda_snapshots = ec2.describe_snapshots(
+                OwnerIds=['self'],
+                Filters=[
+                    {'Name': 'volume-id', 'Values': [volume_id]},
+                    {'Name': 'tag:CreatedBy', 'Values': ['LambdaAutoSnapshot']}
+                ]
+            )['Snapshots']
+
+            sorted_snaps = sorted(lambda_snapshots, key=lambda x: x['StartTime'], reverse=True)
+
+            if len(sorted_snaps) > RETENTION_COUNT:
+                old_snaps = sorted_snaps[RETENTION_COUNT:]
+                for old in old_snaps:
+                    ec2.delete_snapshot(SnapshotId=old['SnapshotId'])
+                    snapshots_deleted.append(old['SnapshotId'])
+
+        message = (
+            f"Snapshot Automation for Instance {INSTANCE_ID}\n\n"
+            f"Snapshots Created ({len(snapshots_created)}): {snapshots_created}\n"
+            f"Snapshots Deleted ({len(snapshots_deleted)}): {snapshots_deleted}\n"
+        )
+
+        sns.publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Subject=f"EC2 Snapshot Report - Instance {INSTANCE_ID}",
+            Message=message
+        )
+
+        return {"status": "success"}
+
+    except Exception as error:
+        sns.publish(
+            TopicArn=SNS_TOPIC_ARN,
+            Subject=f"Snapshot Automation FAILED - Instance {INSTANCE_ID}",
+            Message=str(error)
+        )
+        raise error
