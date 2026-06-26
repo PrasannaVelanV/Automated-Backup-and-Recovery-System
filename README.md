@@ -87,7 +87,7 @@ The Lambda execution role includes permissions for:
 ```
 Automated-Backup-and-Recovery-System/
 │
-├── lambda_function.py
+├── lambda_function.txt
 ├── README.md
 ├── Architecture - Automated Backup and Recovery System.png
 ├── Screenshots/
